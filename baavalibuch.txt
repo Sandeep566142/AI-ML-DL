@@ -1,0 +1,229 @@
+1) NLP
+---------------------
+
+import pandas as pd
+import numpy as np
+import Levenshtein
+import threading
+import xgboost as xgb
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import linear_kernel
+
+# Step 1: Load your dataset with questions and answers into a DataFrame
+# Replace 'your_dataset.csv' with the actual file path or URL of your dataset.
+data = pd.read_csv('kaggle dictionary set for question and answers')
+
+# Step 2: Create a function to retrieve the closest question based on Levenshtein distance
+def get_closest_question(input_str, questions):
+    min_distance = float('inf')
+    closest_question = None
+
+    for question in questions:
+        distance = Levenshtein.distance(input_str, question)
+        if distance < min_distance:
+            min_distance = distance
+            closest_question = question
+
+    return closest_question
+
+# Step 3: Parallelize the search using Python threads
+def parallel_search(input_str, questions):
+    num_threads = 4  # You can adjust the number of threads as needed.
+    thread_results = []
+
+    def search_thread(start, end):
+        thread_closest_question = None
+        min_distance = float('inf')
+
+        for i in range(start, end):
+            distance = Levenshtein.distance(input_str, questions[i])
+            if distance < min_distance:
+                min_distance = distance
+                thread_closest_question = questions[i]
+
+        thread_results.append(thread_closest_question)
+
+    # Split the questions list into chunks for parallel processing
+    chunk_size = len(questions) // num_threads
+    threads = []
+
+    for i in range(num_threads):
+        start = i * chunk_size
+        end = (i + 1) * chunk_size if i < num_threads - 1 else len(questions)
+        thread = threading.Thread(target=search_thread, args=(start, end))
+        threads.append(thread)
+        thread.start()
+
+    for thread in threads:
+        thread.join()
+
+    # Choose the closest question among all threads
+    closest_question = None
+    min_distance = float('inf')
+
+    for result in thread_results:
+        distance = Levenshtein.distance(input_str, result)
+        if distance < min_distance:
+            min_distance = distance
+            closest_question = result
+
+    return closest_question
+
+# Step 4: Implement XGBoost ranking
+# Assuming you have features and labels for ranking (e.g., TF-IDF vectors for questions and answers)
+# Train an XGBoost model to rank responses.
+
+# Step 5: Rank responses using a combination of Levenshtein and XGBoost
+def rank_responses(input_str, closest_question, responses, xgb_model):
+    # Calculate Levenshtein similarity score
+    lev_similarity = 1 - (Levenshtein.distance(input_str, closest_question) / max(len(input_str), len(closest_question)))
+
+    # Calculate TF-IDF similarity score (you can use other features as well)
+    tfidf_vectorizer = TfidfVectorizer()
+    tfidf_matrix = tfidf_vectorizer.fit_transform(responses)
+    query_tfidf = tfidf_vectorizer.transform([input_str])
+    cosine_similarities = linear_kernel(query_tfidf, tfidf_matrix).flatten()
+
+    # Predict XGBoost ranking score
+    xgb_input = np.array([lev_similarity, cosine_similarities[responses.index(closest_question)]])
+    xgb_ranking_score = xgb_model.predict(xgb_input.reshape(1, -1))[0]
+
+    # Combine the scores using a weighted sum (you can adjust the weights)
+    combined_score = 0.7 * lev_similarity + 0.3 * xgb_ranking_score
+
+    # Rank responses based on the combined score
+    ranked_responses = sorted(zip(responses, cosine_similarities), key=lambda x: x[1], reverse=True)
+    ranked_responses = [(response, cosine_similarity, 0.7 * lev_similarity + 0.3 * cosine_similarity) for response, cosine_similarity in ranked_responses]
+
+    return ranked_responses
+
+# Example usage:
+input_str = "Your input question"
+closest_question = parallel_search(input_str, data['question'].tolist())
+responses = data[data['question'] == closest_question]['answer'].tolist()
+
+# Load your trained XGBoost model
+xgb_model = xgb.Booster(model_file='xgb_model.model')
+
+ranked_responses = rank_responses(input_str, closest_question, responses, xgb_model)
+
+# Print the ranked responses
+for response, cosine_similarity, combined_score in ranked_responses:
+    print(f"Response: {response}")
+    print(f"Cosine Similarity: {cosine_similarity}")
+    print(f"Combined Score: {combined_score}")
+
+
+
+
+
+
+
+
+2) reinforced learning
+   -------------------------
+
+import math
+import random
+
+class Node:
+    def __init__(self, state):
+        self.state = state
+        self.children = []
+        self.parent = None
+        self.visits = 0
+        self.value = 0
+
+    def is_fully_expanded(self):
+        return len(self.children) == len(self.state.get_possible_actions())
+
+    def select_child(self):
+        if not self.is_fully_expanded():
+            return self.expand()
+        else:
+            return self.best_child()
+
+    def expand(self):
+        actions = self.state.get_possible_actions()
+        untried_actions = [action for action in actions if action not in [child.state for child in self.children]]
+        if untried_actions:
+            action = random.choice(untried_actions)
+            child_state = self.state.perform_action(action)
+            child_node = Node(child_state)
+            child_node.parent = self
+            self.children.append(child_node)
+            return child_node
+        else:
+            return self.best_child()
+
+    def best_child(self):
+        exploration_weight = 1.0  # You can tune this hyperparameter
+        return max(self.children, key=lambda child: child.value / child.visits + exploration_weight * math.sqrt(math.log(self.visits) / child.visits))
+
+    def backpropagate(self, value):
+        self.visits += 1
+        self.value += value
+        if self.parent:
+            self.parent.backpropagate(value)
+
+def monte_carlo_tree_search(root_state, max_iterations):
+    root_node = Node(root_state)
+
+    for _ in range(max_iterations):
+        node = root_node
+        while not node.state.is_terminal() and node.is_fully_expanded():
+            node = node.select_child()
+
+        if not node.state.is_terminal():
+            node = node.expand()
+
+        value = node.state.simulate()
+        node.backpropagate(value)
+
+    best_child = max(root_node.children, key=lambda child: child.visits)
+    return best_child.state.get_path()
+
+class GridState:
+    def __init__(self, x, y, width, height):
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+
+    def get_possible_actions(self):
+        actions = []
+        if self.x < self.width - 1:
+            actions.append((self.x + 1, self.y))
+        if self.y < self.height - 1:
+            actions.append((self.x, self.y + 1))
+        return actions
+
+    def perform_action(self, action):
+        x, y = action
+        return GridState(x, y, self.width, self.height)
+
+    def is_terminal(self):
+        return self.x == self.width - 1 and self.y == self.height - 1
+
+    def simulate(self):
+        # Simulate the value of the state (e.g., a reward or score)
+        return random.uniform(0, 1)
+
+    def get_path(self):
+        path = [(self.x, self.y)]
+        node = self
+        while node.parent:
+            path.append((node.parent.state.x, node.parent.state.y))
+            node = node.parent
+        path.reverse()
+        return path
+
+if __name__ == "__main__":
+    grid_width = 5
+    grid_height = 5
+    initial_state = GridState(0, 0, grid_width, grid_height)
+    max_iterations = 1000
+
+    path = monte_carlo_tree_search(initial_state, max_iterations)
+    print("Path:", path)
+
